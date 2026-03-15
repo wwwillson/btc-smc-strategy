@@ -11,11 +11,20 @@ from datetime import timedelta
 st.set_page_config(page_title="BTC IFVG 操縱策略", layout="wide")
 st.title("📈 BTC 量化交易: IFVG 流動性操縱策略")
 
-# 側邊欄設定參數
-st.sidebar.header("⚙️ 參數設定")
+# ==========================================
+# 側邊欄設定參數與重整按鈕
+# ==========================================
+st.sidebar.header("⚙️ 控制台")
+
+# 新增：重新整理按鈕
+if st.sidebar.button("🔄 重新整理最新資料", use_container_width=True):
+    st.cache_data.clear()  # 清除 API 快取
+    st.rerun()             # 強制重新整理畫面
+
+st.sidebar.markdown("---")
 
 # 讓使用者可以選擇資料來源
-data_source = st.sidebar.radio("數據來源 (Data Source)", ["Binance.US API (完美支援雲端部署)", "Yahoo Finance"])
+data_source = st.sidebar.radio("數據來源 (Data Source)",["Binance.US API (完美支援雲端部署)", "Yahoo Finance"])
 
 if "Binance" in data_source:
     ticker = st.sidebar.text_input("交易對 (Ticker)", "BTCUSDT")
@@ -42,10 +51,8 @@ st.markdown("""
 # ==========================================
 @st.cache_data(ttl=300)
 def load_binance_us_data(symbol, interval, limit=1000):
-    # 改用 .us 網域，允許美國主機 (Streamlit Cloud) 存取
     url = "https://api.binance.us/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    # 加上 headers 偽裝成瀏覽器，防止基礎的防機器人阻擋
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -96,7 +103,7 @@ def load_yf_data(ticker, timeframe):
     return pd.DataFrame()
 
 # 載入資料
-with st.spinner(f"正在從 {data_source.split(' ')[0]} 載入 {ticker} 數據..."):
+with st.spinner(f"正在從 {data_source.split(' ')[0]} 載入 {ticker} 最新數據..."):
     if "Binance" in data_source:
         df = load_binance_us_data(ticker, timeframe)
     else:
@@ -165,7 +172,7 @@ for i in range(2, len(df)):
                         signals.append({'type': 'SELL', 'date': df.index[i], 'entry': entry, 'sl': sl, 'tp': tp})
 
     # 清理太舊的 FVG (保留近30根K線以內)
-    bearish_fvgs = [f for f in bearish_fvgs if f['active'] and i - f['index'] < 30]
+    bearish_fvgs =[f for f in bearish_fvgs if f['active'] and i - f['index'] < 30]
     bullish_fvgs =[f for f in bullish_fvgs if f['active'] and i - f['index'] < 30]
 
 # ==========================================
@@ -185,7 +192,7 @@ fig = go.Figure(data=[go.Candlestick(
 )])
 
 # 計算 K 線寬度
-candle_width = df.index[1] - df.index[0]
+candle_width = df.index[1] - df.index[0] if len(df.index) > 1 else timedelta(hours=1)
 
 for sig in plot_signals:
     x_start = sig['date']
@@ -236,3 +243,6 @@ if plot_signals:
     st.dataframe(df_signals.iloc[::-1].reset_index(drop=True), use_container_width=True)
 else:
     st.info("在目前顯示的K線範圍內，沒有觸發新的 IFVG 訊號。可以嘗試向左滑動圖表，或在左側邊欄增加『圖表顯示K線數量』。")
+
+# 最底部提示最近更新時間
+st.caption(f"🕒 最新資料更新時間: {pd.Timestamp.now('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')}")
