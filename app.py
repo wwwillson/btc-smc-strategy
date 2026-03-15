@@ -18,8 +18,8 @@ st.sidebar.header("⚙️ 控制台")
 
 # 重新整理按鈕：清除快取並強制重整
 if st.sidebar.button("🔄 重新整理最新資料", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
+    st.cache_data.clear() # 清除所有快取
+    st.rerun()            # 重新載入網頁
 
 st.sidebar.markdown("---")
 
@@ -36,7 +36,7 @@ else:
 swing_length = st.sidebar.slider("流動性波段長度 (Swing Length)", 5, 50, 15, help="決定高低點的K線數量")
 risk_reward_ratio = st.sidebar.slider("盈虧比 (R/R Ratio)", 1.0, 5.0, 2.0, 0.1, help="止盈距離為止損距離的幾倍")
 # 支援到 3000 根 K 線
-plot_rows = st.sidebar.slider("圖表顯示K線數量", 100, 3000, 500)
+plot_rows = st.sidebar.slider("圖表顯示 K 線數量", 100, 3000, 500, help="如果調太小(例如100)，畫面內可能會看不到歷史訊號喔！")
 
 st.header("📝 交易邏輯 (Strategy Logic)")
 st.markdown("""
@@ -48,44 +48,51 @@ st.markdown("""
 """)
 
 # ==========================================
-# 資料獲取函數 (突破單次 1000 根 K 線限制)
+# 資料獲取函數 (加上自動重試機制)
 # ==========================================
 @st.cache_data(ttl=300)
 def load_binance_us_data(symbol, interval, limit=1000):
     url = "https://api.binance.us/api/v3/klines"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     all_klines =[]
     end_time = None
     remaining = limit
+    session = requests.Session()
     
     try:
-        # 使用迴圈自動分頁抓取，突破 API 每次只能抓 1000 根的限制
+        # 使用迴圈自動分頁抓取
         while remaining > 0:
             fetch_limit = min(remaining, 1000)
             params = {"symbol": symbol, "interval": interval, "limit": fetch_limit}
             if end_time:
                 params['endTime'] = end_time
                 
-            res = requests.get(url, params=params, headers=headers, timeout=10)
-            res.raise_for_status()
-            data = res.json()
-            
-            if not data:
+            # 三次自動重試機制 (防呆防斷線)
+            success = False
+            for _ in range(3):
+                try:
+                    res = session.get(url, params=params, headers=headers, timeout=10)
+                    res.raise_for_status()
+                    data = res.json()
+                    success = True
+                    break
+                except Exception:
+                    time.sleep(1) # 若失敗則等 1 秒再試
+                    
+            if not success or not data:
                 break
                 
-            # 將新的資料接在前面 (因為是往前抓取歷史)
-            all_klines = data + all_klines
-            
-            # 設定下一次抓取的結束時間為這批資料的第一根 K 線時間減 1 毫秒
-            end_time = data[0][0] - 1
+            all_klines = data + all_klines # 將舊資料接在前面
+            end_time = data[0][0] - 1      # 設定下一批抓取的結束時間
             remaining -= len(data)
             
             if len(data) < fetch_limit:
-                break # 已經沒有更早的資料了
+                break
                 
+        if not all_klines:
+            return pd.DataFrame()
+            
         df = pd.DataFrame(all_klines, columns=[
             'Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 
             'Close time', 'Quote asset vol', 'Trades', 
@@ -95,13 +102,12 @@ def load_binance_us_data(symbol, interval, limit=1000):
         # 轉換為台灣時間 (UTC+8)
         df['date'] = pd.to_datetime(df['Open time'], unit='ms') + pd.Timedelta(hours=8)
         df.set_index('date', inplace=True)
-        
         for col in['Open', 'High', 'Low', 'Close', 'Volume']:
             df[col] = df[col].astype(float)
             
         return df
     except Exception as e:
-        st.error(f"Binance.US API 連線失敗: {e}")
+        st.error(f"Binance API 連線失敗: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=600)
@@ -110,9 +116,7 @@ def load_yf_data(ticker, timeframe):
     period = period_map.get(timeframe, "60d")
     
     session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    })
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
     
     for _ in range(3):
         try:
@@ -131,17 +135,17 @@ def load_yf_data(ticker, timeframe):
 # ==========================================
 # 載入資料
 # ==========================================
-# 確保我們抓取的資料量比「圖表顯示數量」還多一些，這樣左邊才有足夠的歷史來計算波段高低點
+# 確保抓取的總資料量至少有 1000 根，這樣演算法才有足夠歷史去計算高低點
 required_limit = max(1000, plot_rows + (swing_length * 4))
 
-with st.spinner(f"正在從 {data_source.split(' ')[0]} 載入 {ticker} 最新數據..."):
+with st.spinner(f"🔄 正在獲取 {ticker} 最新市場數據..."):
     if "Binance" in data_source:
         df = load_binance_us_data(ticker, timeframe, limit=required_limit)
     else:
         df = load_yf_data(ticker, timeframe)
 
 if df.empty:
-    st.error("無法獲取資料，請檢查 Ticker 或稍後再試。")
+    st.error("無法獲取資料，可能是網路不穩或 Ticker 錯誤，請再按一次「重新整理」。")
     st.stop()
 
 # ==========================================
@@ -150,11 +154,10 @@ if df.empty:
 signals =[]
 last_pivot_low = None
 last_pivot_high = None
-bearish_fvgs = []
+bearish_fvgs =[]
 bullish_fvgs =[]
 
 for i in range(2, len(df)):
-    # 1. 計算無未來函數的波段高低點
     if i >= 2 * swing_length:
         window_lows = df['Low'].iloc[i - 2 * swing_length : i + 1]
         window_highs = df['High'].iloc[i - 2 * swing_length : i + 1]
@@ -164,7 +167,6 @@ for i in range(2, len(df)):
         if df['High'].iloc[i - swing_length] == window_highs.max():
             last_pivot_high = df['High'].iloc[i - swing_length]
             
-    # 2. 尋找 FVG
     if df['High'].iloc[i] < df['Low'].iloc[i-2]:
         bearish_fvgs.append({
             'index': i, 'date': df.index[i],
@@ -177,7 +179,6 @@ for i in range(2, len(df)):
             'top': df['Low'].iloc[i], 'bot': df['High'].iloc[i-2], 'active': True
         })
         
-    # 3. 尋找 IFVG 突破與流動性掃平確認
     for fvg in bearish_fvgs:
         if fvg['active'] and df['Close'].iloc[i] > fvg['top']:
             fvg['active'] = False
@@ -202,7 +203,6 @@ for i in range(2, len(df)):
                         tp = entry - risk_reward_ratio * (sl - entry)
                         signals.append({'type': 'SELL', 'date': df.index[i], 'entry': entry, 'sl': sl, 'tp': tp})
 
-    # 清理太舊的 FVG (保留近30根K線以內)
     bearish_fvgs =[f for f in bearish_fvgs if f['active'] and i - f['index'] < 30]
     bullish_fvgs =[f for f in bullish_fvgs if f['active'] and i - f['index'] < 30]
 
@@ -213,7 +213,11 @@ st.subheader(f"📊 {ticker} 圖表與交易訊號")
 
 # 切片顯示指定的 K 線數量
 df_plot = df.iloc[-plot_rows:]
-plot_signals = [s for s in signals if s['date'] >= df_plot.index[0]]
+plot_signals =[s for s in signals if s['date'] >= df_plot.index[0]]
+
+# 【新增】防呆提示：如果選擇的 K 線太少導致沒訊號，跳出顯眼的警告
+if not plot_signals:
+    st.warning(f"⚠️ 注意：在最近的 {plot_rows} 根 K 線範圍內，並沒有觸發任何 IFVG 交易訊號。如果你覺得訊號『不見了』，請在左側面板將『圖表顯示 K 線數量』調高 (例如調到 500 或 1000) 來檢視歷史訊號。")
 
 fig = go.Figure(data=[go.Candlestick(
     x=df_plot.index,
@@ -222,34 +226,25 @@ fig = go.Figure(data=[go.Candlestick(
     increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
 )])
 
-# 計算 K 線寬度
 candle_width = df.index[1] - df.index[0] if len(df.index) > 1 else timedelta(hours=1)
 
 for sig in plot_signals:
     x_start = sig['date']
-    x_end = sig['date'] + (candle_width * 15)  # 視覺方塊向右延伸 15 根 K 線
+    x_end = sig['date'] + (candle_width * 15)
 
     if sig['type'] == 'BUY':
-        # 標示進場箭頭
         fig.add_annotation(x=x_start, y=sig['entry'], text="BUY", showarrow=True, arrowhead=1, 
                            arrowcolor="#00FF00", arrowsize=2, ax=0, ay=30, font=dict(color="#00FF00", size=12, weight="bold"))
-        # 繪製 SL 區域 (紅色)
         fig.add_shape(type="rect", x0=x_start, y0=sig['sl'], x1=x_end, y1=sig['entry'], fillcolor="rgba(255, 0, 0, 0.2)", line_width=1, line_color="red")
-        # 繪製 TP 區域 (綠色)
         fig.add_shape(type="rect", x0=x_start, y0=sig['entry'], x1=x_end, y1=sig['tp'], fillcolor="rgba(0, 255, 0, 0.2)", line_width=1, line_color="green")
-        # 數值文字
         fig.add_annotation(x=x_end, y=sig['sl'], text=f"SL: {sig['sl']:.1f}", showarrow=False, font=dict(color="red"), xanchor="left")
         fig.add_annotation(x=x_end, y=sig['tp'], text=f"TP: {sig['tp']:.1f}", showarrow=False, font=dict(color="green"), xanchor="left")
 
     elif sig['type'] == 'SELL':
-        # 標示進場箭頭
         fig.add_annotation(x=x_start, y=sig['entry'], text="SELL", showarrow=True, arrowhead=1, 
                            arrowcolor="#FF0000", arrowsize=2, ax=0, ay=-30, font=dict(color="#FF0000", size=12, weight="bold"))
-        # 繪製 SL 區域 (紅色)
         fig.add_shape(type="rect", x0=x_start, y0=sig['entry'], x1=x_end, y1=sig['sl'], fillcolor="rgba(255, 0, 0, 0.2)", line_width=1, line_color="red")
-        # 繪製 TP 區域 (綠色)
         fig.add_shape(type="rect", x0=x_start, y0=sig['tp'], x1=x_end, y1=sig['entry'], fillcolor="rgba(0, 255, 0, 0.2)", line_width=1, line_color="green")
-        # 數值文字
         fig.add_annotation(x=x_end, y=sig['sl'], text=f"SL: {sig['sl']:.1f}", showarrow=False, font=dict(color="red"), xanchor="left")
         fig.add_annotation(x=x_end, y=sig['tp'], text=f"TP: {sig['tp']:.1f}", showarrow=False, font=dict(color="green"), xanchor="left")
 
@@ -264,7 +259,6 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# 顯示最新的訊號表格
 if plot_signals:
     st.subheader("📋 近期交易訊號列表")
     df_signals = pd.DataFrame(plot_signals)
@@ -272,8 +266,5 @@ if plot_signals:
     df_signals = df_signals[['date', 'type', 'entry', 'sl', 'tp']]
     df_signals.columns =['台灣時間 (Time)', '方向 (Type)', '進場價 (Entry)', '止損 (SL)', '止盈 (TP)']
     st.dataframe(df_signals.iloc[::-1].reset_index(drop=True), use_container_width=True)
-else:
-    st.info("在目前顯示的K線範圍內，沒有觸發新的 IFVG 訊號。可以嘗試向左滑動圖表，或在左側邊欄增加『圖表顯示K線數量』。")
 
-# 最底部提示最近更新時間
-st.caption(f"🕒 最新資料更新時間: {pd.Timestamp.now('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"🕒 本次畫面渲染完成時間: {pd.Timestamp.now('Asia/Taipei').strftime('%Y-%m-%d %H:%M:%S')}")
