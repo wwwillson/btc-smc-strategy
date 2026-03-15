@@ -16,10 +16,10 @@ st.title("📈 BTC 量化交易: IFVG 流動性操縱策略")
 # ==========================================
 st.sidebar.header("⚙️ 控制台")
 
-# 新增：重新整理按鈕
+# 重新整理按鈕：清除快取並強制重整
 if st.sidebar.button("🔄 重新整理最新資料", use_container_width=True):
-    st.cache_data.clear()  # 清除 API 快取
-    st.rerun()             # 強制重新整理畫面
+    st.cache_data.clear()
+    st.rerun()
 
 st.sidebar.markdown("---")
 
@@ -35,7 +35,8 @@ else:
 
 swing_length = st.sidebar.slider("流動性波段長度 (Swing Length)", 5, 50, 15, help="決定高低點的K線數量")
 risk_reward_ratio = st.sidebar.slider("盈虧比 (R/R Ratio)", 1.0, 5.0, 2.0, 0.1, help="止盈距離為止損距離的幾倍")
-plot_rows = st.sidebar.slider("圖表顯示K線數量", 100, 2000, 300)
+# 支援到 3000 根 K 線
+plot_rows = st.sidebar.slider("圖表顯示K線數量", 100, 3000, 500)
 
 st.header("📝 交易邏輯 (Strategy Logic)")
 st.markdown("""
@@ -47,20 +48,45 @@ st.markdown("""
 """)
 
 # ==========================================
-# 資料獲取函數 (使用 Binance.US 避開雲端 IP 封鎖)
+# 資料獲取函數 (突破單次 1000 根 K 線限制)
 # ==========================================
 @st.cache_data(ttl=300)
 def load_binance_us_data(symbol, interval, limit=1000):
     url = "https://api.binance.us/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     
+    all_klines =[]
+    end_time = None
+    remaining = limit
+    
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=10)
-        res.raise_for_status()
-        df = pd.DataFrame(res.json(), columns=[
+        # 使用迴圈自動分頁抓取，突破 API 每次只能抓 1000 根的限制
+        while remaining > 0:
+            fetch_limit = min(remaining, 1000)
+            params = {"symbol": symbol, "interval": interval, "limit": fetch_limit}
+            if end_time:
+                params['endTime'] = end_time
+                
+            res = requests.get(url, params=params, headers=headers, timeout=10)
+            res.raise_for_status()
+            data = res.json()
+            
+            if not data:
+                break
+                
+            # 將新的資料接在前面 (因為是往前抓取歷史)
+            all_klines = data + all_klines
+            
+            # 設定下一次抓取的結束時間為這批資料的第一根 K 線時間減 1 毫秒
+            end_time = data[0][0] - 1
+            remaining -= len(data)
+            
+            if len(data) < fetch_limit:
+                break # 已經沒有更早的資料了
+                
+        df = pd.DataFrame(all_klines, columns=[
             'Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 
             'Close time', 'Quote asset vol', 'Trades', 
             'Taker buy base', 'Taker buy quote', 'Ignore'
@@ -85,7 +111,7 @@ def load_yf_data(ticker, timeframe):
     
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     })
     
     for _ in range(3):
@@ -102,10 +128,15 @@ def load_yf_data(ticker, timeframe):
             time.sleep(2)
     return pd.DataFrame()
 
+# ==========================================
 # 載入資料
+# ==========================================
+# 確保我們抓取的資料量比「圖表顯示數量」還多一些，這樣左邊才有足夠的歷史來計算波段高低點
+required_limit = max(1000, plot_rows + (swing_length * 4))
+
 with st.spinner(f"正在從 {data_source.split(' ')[0]} 載入 {ticker} 最新數據..."):
     if "Binance" in data_source:
-        df = load_binance_us_data(ticker, timeframe)
+        df = load_binance_us_data(ticker, timeframe, limit=required_limit)
     else:
         df = load_yf_data(ticker, timeframe)
 
