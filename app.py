@@ -30,28 +30,32 @@ st.markdown("""
 
 st.divider()
 
-# --- 獲取數據函數 (改用穩定且無限制的 Binance 幣安公開 API) ---
+# --- 獲取數據函數 (改用不受美國 IP 限制的 Kraken 公開 API) ---
 @st.cache_data(ttl=300) # 每5分鐘重新抓取一次資料
 def load_data():
     try:
-        url = "https://api.binance.com/api/v3/klines"
+        url = "https://api.kraken.com/0/public/OHLC"
         params = {
-            "symbol": "BTCUSDT",
-            "interval": "5m",
-            "limit": 1000  # 抓取最近 1000 根 5 分鐘 K 線 (大約 3.4 天)
+            "pair": "XBTUSD", # Kraken 中 BTC 稱為 XBT
+            "interval": 5     # 5 分鐘 K 線
         }
         response = requests.get(url, params=params)
         response.raise_for_status()
         data = response.json()
         
+        if data['error']:
+            st.error(f"Kraken API 回傳錯誤: {data['error']}")
+            return pd.DataFrame()
+            
+        # Kraken 回傳的資料結構中，第一個 key 通常是交易對名稱 (如 'XXBTZUSD')
+        pair_key = [k for k in data['result'].keys() if k != 'last'][0]
+        ohlc_data = data['result'][pair_key]
+        
         # 轉換為 Pandas DataFrame
-        df = pd.DataFrame(data, columns=[
-            'Open time', 'Open', 'High', 'Low', 'Close', 'Volume',
-            'Close time', 'Quote asset volume', 'Number of trades',
-            'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'
-        ])
-        # 將時間戳轉換為 datetime 並設定為索引 (加上 UTC+8 台灣時間調整)
-        df['Date'] = pd.to_datetime(df['Open time'], unit='ms') + timedelta(hours=8)
+        df = pd.DataFrame(ohlc_data, columns=['Time', 'Open', 'High', 'Low', 'Close', 'VWAP', 'Volume', 'Count'])
+        
+        # 將時間戳轉換為 datetime 並設定為索引 (Kraken 時間戳為秒級，加上 UTC+8 調整)
+        df['Date'] = pd.to_datetime(df['Time'], unit='s') + timedelta(hours=8)
         df.set_index('Date', inplace=True)
         
         # 轉換價格欄位為浮點數
@@ -111,22 +115,23 @@ def generate_signals(df):
     return pd.DataFrame(signals)
 
 # --- 載入數據與產生訊號 ---
-with st.spinner("正在透過 Binance API 抓取最新 BTC 數據..."):
+with st.spinner("正在透過 Kraken API 抓取最新 BTC 數據..."):
     df = load_data()
     signals_df = generate_signals(df)
 
 # --- 顯示近期交易訊號清單 ---
 st.subheader("🚨 近期觸發交易訊號提示")
 if not signals_df.empty:
+    # 套用最新 Streamlit 語法 `width="stretch"`
     st.dataframe(
         signals_df.style.format({'Entry': '${:,.2f}', 'SL': '${:,.2f}', 'TP': '${:,.2f}'}),
-        width="stretch"  # 修正棄用語法
+        width="stretch"
     )
 else:
     st.info("目前盤面近期無符合 SMC 條件的交易訊號。")
 
 # --- 繪製互動式圖表 ---
-st.subheader("📊 BTC/USDT 5分鐘 K線圖 (含止損止盈標示)")
+st.subheader("📊 BTC/USD 5分鐘 K線圖 (含止損止盈標示)")
 
 if not df.empty:
     fig = go.Figure(data=[go.Candlestick(
@@ -135,7 +140,7 @@ if not df.empty:
         high=df['High'],
         low=df['Low'],
         close=df['Close'],
-        name='BTC/USDT'
+        name='BTC/USD'
     )])
 
     if not signals_df.empty:
@@ -159,7 +164,7 @@ if not df.empty:
         # 在畫面上畫出每個訊號的 SL 和 TP 線
         for idx, row in signals_df.iterrows():
             start_date = row['Date']
-            # 畫線向右延伸約 4 小時的長度以供辨識
+            # 畫線向右延伸大約 4 小時的長度以供辨識
             end_date = start_date + timedelta(hours=4) 
             
             # 止損線 (紅色)
@@ -186,4 +191,7 @@ if not df.empty:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
 
-    # 在 Streamlit 上顯示圖表 (修正棄
+    # 在 Streamlit 上顯示圖表 (套用最新參數語法)
+    st.plotly_chart(fig, width="stretch")
+
+st.caption("免責聲明：此圖表為 SMC 理論之演算法簡化版，並以 Kraken 即時數據進行繪製，僅供學習程式語言與技術分析參考，不構成任何財務投資建議。")
