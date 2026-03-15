@@ -14,15 +14,15 @@ st.title("📈 BTC 量化交易: IFVG 流動性操縱策略")
 # 側邊欄設定參數
 st.sidebar.header("⚙️ 參數設定")
 
-# 讓使用者可以選擇資料來源 (改用不鎖雲端IP的 Bybit)
-data_source = st.sidebar.radio("數據來源 (Data Source)", ["Bybit API (雲端部署推薦)", "Yahoo Finance"])
+# 讓使用者可以選擇資料來源
+data_source = st.sidebar.radio("數據來源 (Data Source)", ["Binance.US API (完美支援雲端部署)", "Yahoo Finance"])
 
-if "Bybit" in data_source:
+if "Binance" in data_source:
     ticker = st.sidebar.text_input("交易對 (Ticker)", "BTCUSDT")
     timeframe = st.sidebar.selectbox("時區 (Timeframe)",["15m", "1h", "4h", "1d"], index=1)
 else:
     ticker = st.sidebar.text_input("交易對 (Ticker)", "BTC-USD")
-    timeframe = st.sidebar.selectbox("時區 (Timeframe)", ["15m", "1h", "4h", "1d"], index=1)
+    timeframe = st.sidebar.selectbox("時區 (Timeframe)",["15m", "1h", "4h", "1d"], index=1)
 
 swing_length = st.sidebar.slider("流動性波段長度 (Swing Length)", 5, 50, 15, help="決定高低點的K線數量")
 risk_reward_ratio = st.sidebar.slider("盈虧比 (R/R Ratio)", 1.0, 5.0, 2.0, 0.1, help="止盈距離為止損距離的幾倍")
@@ -38,49 +38,37 @@ st.markdown("""
 """)
 
 # ==========================================
-# 資料獲取函數 (改用 Bybit 避開 Binance 451 封鎖)
+# 資料獲取函數 (使用 Binance.US 避開雲端 IP 封鎖)
 # ==========================================
 @st.cache_data(ttl=300)
-def load_bybit_data(symbol, interval, limit=1000):
-    # Bybit API 的時間刻度代號對應
-    interval_map = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
-    bybit_interval = interval_map.get(interval, "60")
-    
-    url = "https://api.bybit.com/v5/market/kline"
-    params = {
-        "category": "linear",  # 使用永續合約數據，流動性最準確
-        "symbol": symbol,
-        "interval": bybit_interval,
-        "limit": limit
+def load_binance_us_data(symbol, interval, limit=1000):
+    # 改用 .us 網域，允許美國主機 (Streamlit Cloud) 存取
+    url = "https://api.binance.us/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    # 加上 headers 偽裝成瀏覽器，防止基礎的防機器人阻擋
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     try:
-        res = requests.get(url, params=params, timeout=10)
+        res = requests.get(url, params=params, headers=headers, timeout=10)
         res.raise_for_status()
-        data = res.json()
-        
-        if data['retCode'] != 0:
-            st.error(f"Bybit API 錯誤: {data['retMsg']}")
-            return pd.DataFrame()
-            
-        # Bybit 傳回來的資料是「最新排到最舊」，需要轉換
-        kline_list = data['result']['list']
-        df = pd.DataFrame(kline_list, columns=['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Turnover'])
+        df = pd.DataFrame(res.json(), columns=[
+            'Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 
+            'Close time', 'Quote asset vol', 'Trades', 
+            'Taker buy base', 'Taker buy quote', 'Ignore'
+        ])
         
         # 轉換為台灣時間 (UTC+8)
-        df['Open time'] = df['Open time'].astype(float)
         df['date'] = pd.to_datetime(df['Open time'], unit='ms') + pd.Timedelta(hours=8)
         df.set_index('date', inplace=True)
         
         for col in['Open', 'High', 'Low', 'Close', 'Volume']:
             df[col] = df[col].astype(float)
             
-        # 把時間排序反轉為「從舊到新」
-        df = df.sort_index()
         return df
-        
     except Exception as e:
-        st.error(f"Bybit API 連線失敗: {e}")
+        st.error(f"Binance.US API 連線失敗: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=600)
@@ -109,13 +97,13 @@ def load_yf_data(ticker, timeframe):
 
 # 載入資料
 with st.spinner(f"正在從 {data_source.split(' ')[0]} 載入 {ticker} 數據..."):
-    if "Bybit" in data_source:
-        df = load_bybit_data(ticker, timeframe)
+    if "Binance" in data_source:
+        df = load_binance_us_data(ticker, timeframe)
     else:
         df = load_yf_data(ticker, timeframe)
 
 if df.empty:
-    st.error("無法獲取資料，請檢查 Ticker 是否正確 (Bybit: BTCUSDT, Yahoo: BTC-USD)。")
+    st.error("無法獲取資料，請檢查 Ticker 或稍後再試。")
     st.stop()
 
 # ==========================================
